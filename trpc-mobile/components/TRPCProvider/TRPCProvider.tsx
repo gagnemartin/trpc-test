@@ -20,7 +20,7 @@ const TRPCProvider: FC<{ children: ReactNode }> = ({ children }) => {
             true: wsLink({
               transformer: SuperJSON,
               client: createWSClient({
-                url: 'ws://192.168.1.192:8000/trpc'
+                url: WS_URL
                 // headers: async () => {
                 //   const token = await auth.currentUser?.getIdToken()
                 //   return {
@@ -30,7 +30,7 @@ const TRPCProvider: FC<{ children: ReactNode }> = ({ children }) => {
               })
             }),
             false: httpBatchLink({
-              url: 'http://192.168.1.192:8000/trpc',
+              url: API_URL,
               transformer: SuperJSON,
               headers: () => {
                 return {
