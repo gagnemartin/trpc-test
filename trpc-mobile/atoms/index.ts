@@ -2,10 +2,10 @@ import { atom, useAtom } from 'jotai'
 import { atomWithStorage, createJSONStorage } from 'jotai/utils'
 import { theme, themeDark, themeDefault } from '@/styles/theme'
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { Session, User } from '@/interfaces/user.interface'
+import { Session } from '@/interfaces/user.interface'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth } from '@/firebase.config'
-import { trpc } from '@/trpc'
+import { User } from 'express-api-starter-ts/src/database/schema'
 
 const storage = createJSONStorage(() => AsyncStorage)
 

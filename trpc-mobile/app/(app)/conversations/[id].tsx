@@ -1,29 +1,92 @@
 import { Platform, StyleSheet, View, KeyboardAvoidingView, NativeSyntheticEvent, TextInputKeyPressEventData } from 'react-native'
-import { ActivityIndicator, Button, IconButton, Text, TextInput } from 'react-native-paper'
+import { ActivityIndicator, Button, Icon, IconButton, Text, TextInput } from 'react-native-paper'
 import { trpc } from '@/trpc'
-import { useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { useAtomValue } from 'jotai'
 import { sessionAtom, userAtom } from '@/atoms'
 import { Stack, router, useLocalSearchParams } from 'expo-router'
 import Swipeable from 'react-native-gesture-handler/Swipeable'
 import MessagesList from '@/components/MessagesList'
-import { Message, UsersTyping } from '@/interfaces/conversation.interface'
+import { UsersTyping } from '@/interfaces/conversation.interface'
 import MessageInput from '@/components/MessageInput'
 import { FlashList } from '@shopify/flash-list'
-import { User } from '@/interfaces/user.interface'
+import { MessageFormatted, Profile, User } from 'express-api-starter-ts/src/database/schema'
+import { getLastActiveAt } from '@/utils/utils'
+import { FontAwesome } from '@expo/vector-icons'
+import useLastActiveAt from '@/hooks/useLastActiveAt'
+
+interface HeaderProps {
+  participants: Profile[]
+  lastActiveAt?: Record<string, Date | null>
+}
+
+interface Conversation {
+  id: string
+  messages: MessageFormatted[]
+}
+
+const Header = ({ participants, lastActiveAt }: HeaderProps) => {
+  const [_timer, setTimer] = useState(Date.now())
+
+  // Update the timer state every minute to force a re-render
+  useEffect(() => {
+    const intervalId = setInterval(() => setTimer(Date.now()), 60000) // 60000 ms = 1 minute
+    return () => clearInterval(intervalId)
+  }, [])
+
+  if (participants.length === 0) {
+    return (
+      <Text variant='titleMedium' style={{ fontWeight: 'bold' }}>
+        New conversation
+      </Text>
+    )
+  }
+
+  if (participants.length > 1) {
+    return (
+      <Text variant='titleMedium' style={{ fontWeight: 'bold' }}>
+        Group Chat
+      </Text>
+    )
+  }
+
+  return (
+    <View>
+      {participants.map((participant) => {
+        const userLastActiveAt = lastActiveAt ? getLastActiveAt(lastActiveAt?.[participant.userId]) : null
+
+        return (
+          <Fragment key={participant.userId}>
+            <Text variant='titleMedium' style={{ fontWeight: 'bold' }}>
+              {participant.displayName}
+            </Text>
+            {userLastActiveAt && (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {userLastActiveAt === 'now' && <FontAwesome name='circle' color='green' style={{ paddingRight: 7 }} />}
+                <Text variant='bodySmall'>Active {userLastActiveAt}</Text>
+              </View>
+            )}
+          </Fragment>
+        )
+      })}
+    </View>
+  )
+}
 
 export default function TabOneScreen() {
   const utils = trpc.useUtils()
   const { id: conversationId, userId } = useLocalSearchParams<{ id: string; userId: string }>()
   const session = useAtomValue(sessionAtom)
   const user = useAtomValue(userAtom) as User
-  const [replyTo, setReplyTo] = useState<Message | null>(null)
-  const flashListRef = useRef<FlashList<any> | null>(null)
+  const [replyTo, setReplyTo] = useState<MessageFormatted | null>(null)
+  const flashListRef = useRef<FlashList<MessageFormatted> | null>(null)
   const swipeableRefs = useRef<{ [key: string]: Swipeable | null }>({})
   const { data, isLoading: isLoadingConversation } = trpc.conversations.getConversation.useQuery(
     { id: conversationId },
     { enabled: conversationId !== 'new' }
   )
+
+  console.log({ conversationId })
 
   const participantIds = Array.from(
     data?.messages.reduce((acc, message) => {
@@ -33,11 +96,7 @@ export default function TabOneScreen() {
       return acc
     }, new Set<string>()) || []
   )
-  const { data: lastActiveAt } = trpc.users.getLastActiveAt.useQuery(
-    { userIds: participantIds },
-    { enabled: participantIds.length > 0 && conversationId !== 'new' }
-  )
-  console.log({ lastActiveAt })
+  const lastActiveAt = useLastActiveAt({ participantIds, enabled: participantIds.length > 0 && conversationId !== 'new' })
 
   trpc.conversations.onUpdate.useSubscription(
     {
@@ -54,10 +113,10 @@ export default function TabOneScreen() {
           if (!old) return
 
           if (newData.action === 'new_message') {
-            const currentDate = new Date().toISOString()
+            // const currentDate = new Date().toISOString()
             return {
               ...old,
-              messages: old.messages.concat(newData.payload.message)
+              messages: [newData.payload.message, ...old.messages]
             }
           } else if (newData.action === 'read_message') {
             console.log('Another user read the message!')
@@ -76,7 +135,6 @@ export default function TabOneScreen() {
             return old
           }
         })
-        flashListRef.current?.scrollToEnd()
       }
     }
   )
@@ -87,19 +145,21 @@ export default function TabOneScreen() {
 
   // get a list of all the users from the messages in the conversation from their profile displayname
   const participants = Array.from(
-    data?.messages.reduce((acc, message) => {
-      if (message.sentBy !== user.id) {
-        acc.add(message.profile.displayName)
-      }
-      return acc
-    }, new Set()) || []
-  ).join(', ')
+    (data?.messages
+      .reduce((acc, message) => {
+        if (message.sentBy !== user.id) {
+          acc.set(message.profile.userId, message.profile)
+        }
+        return acc
+      }, new Map<string, Profile>())
+      .values() || []) as Profile[]
+  )
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView keyboardVerticalOffset={90} style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <Stack.Screen
         options={{
-          headerTitle: participants,
+          headerTitle: () => <Header participants={participants} lastActiveAt={lastActiveAt} />,
           headerBackTitle: 'Back'
         }}
       />
@@ -108,11 +168,11 @@ export default function TabOneScreen() {
           <MessagesList data={data} flashListRef={flashListRef} swipeableRefs={swipeableRefs} setReplyTo={setReplyTo} />
         )}
       </View>
-      {replyTo && (
+      {/* {replyTo && (
         <View style={styles.replyWrapper}>
           <View style={{ flex: 1 }}>
             <Text variant='bodySmall'>Replying to {replyTo.profile.displayName}</Text>
-            <Text variant='bodyLarge'>{replyTo.content}</Text>
+            <Text variant='bodySmall'>{replyTo.content}</Text>
           </View>
           <IconButton
             icon='close'
@@ -125,7 +185,7 @@ export default function TabOneScreen() {
             }}
           />
         </View>
-      )}
+      )} */}
       <MessageInput
         conversationId={conversationId}
         userId={userId}
@@ -145,16 +205,18 @@ const styles = StyleSheet.create({
   },
   messagesWrapper: {
     flex: 1,
+    paddingHorizontal: 20,
     justifyContent: 'flex-end',
     minWidth: '100%'
-  },
-  replyWrapper: {
-    width: '100%',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#f0f0f0',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center'
   }
+  // replyWrapper: {
+  //   width: '100%',
+  //   paddingHorizontal: 20,
+  //   // paddingVertical: 10,
+  //   // paddingBottom: 0,
+  //   // backgroundColor: '#f0f0f0',
+  //   flexDirection: 'row',
+  //   justifyContent: 'center',
+  //   alignItems: 'center'
+  // }
 })

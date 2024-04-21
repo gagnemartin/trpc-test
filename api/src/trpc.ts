@@ -98,7 +98,7 @@ export const publicProcedure = t.procedure
 // procedure that asserts that the user is logged in
 export const authedProcedure = t.procedure.use(async function isAuthed(opts) {
   const { ctx } = opts
-  
+
   if (!ctx.headers.authorization) {
     throw new TRPCError({ code: 'UNAUTHORIZED' })
   }
@@ -108,7 +108,6 @@ export const authedProcedure = t.procedure.use(async function isAuthed(opts) {
   if (!decodedToken) {
     throw new TRPCError({ code: 'UNAUTHORIZED' })
   }
-
 
   const user = await ctx.db.query.users.findFirst({
     where: (users, { eq }) => eq(users.firebaseUid, decodedToken.uid),
@@ -121,8 +120,15 @@ export const authedProcedure = t.procedure.use(async function isAuthed(opts) {
     throw new TRPCError({ code: 'UNAUTHORIZED' })
   }
 
-  // Set user lastActiveAt that expires in 24 hours
-  ctx.redis.client.set(`user:${user.id}:lastActiveAt`, Date.now(), { EX: 86400 })
+  const now = Date.now()
+  const previousLastActiveAt = await ctx.redis.client.get(`user:${user.id}:lastActiveAt`)
+
+  if (!previousLastActiveAt || now - Number(previousLastActiveAt) > 5 * 60 * 1000) {
+    // Publish to redis if previousActiveAt is more than 5 minutes
+    ctx.redis.publisher.publish('user:onLastActiveAtUpdate', JSON.stringify({ userId: user.id, lastActiveAt: now }))
+  }
+  // Set user lastActiveAt that expires in a week
+  ctx.redis.client.set(`user:${user.id}:lastActiveAt`, now, { EX: 7 * 24 * 60 * 60 })
 
   return opts.next({
     ctx: {

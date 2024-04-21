@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { authedProcedure, createTRPCRouter, publicProcedure } from '../trpc'
 import { profiles, users } from '../database/schema'
 import { TRPCError } from '@trpc/server'
+import { verifyToken } from '../firebase'
+import { observable } from '@trpc/server/observable'
 
 const usersRouter = createTRPCRouter({
   create: publicProcedure
@@ -41,22 +43,27 @@ const usersRouter = createTRPCRouter({
       })
     )
     .query(async ({ ctx, input }) => {
-      if (input.firebaseUid == undefined) {
-        throw new TRPCError({ code: 'BAD_REQUEST' })
-      }
-
-      const user = await ctx.db.query.users.findFirst({
-        where: (users, { eq }) => eq(users.firebaseUid, input.firebaseUid as string),
-        with: {
-          profile: true
+      try {
+        if (input.firebaseUid == undefined) {
+          throw new TRPCError({ code: 'BAD_REQUEST' })
         }
-      })
 
-      if (!user) {
-        throw new TRPCError({ code: 'NOT_FOUND' })
+        const user = await ctx.db.query.users.findFirst({
+          where: (users, { eq }) => eq(users.firebaseUid, input.firebaseUid as string),
+          with: {
+            profile: true
+          }
+        })
+
+        if (!user) {
+          throw new TRPCError({ code: 'NOT_FOUND' })
+        }
+
+        return user
+      } catch (e) {
+        console.error(e)
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' })
       }
-
-      return user
     }),
 
   getLastActiveAt: authedProcedure
@@ -67,18 +74,66 @@ const usersRouter = createTRPCRouter({
     )
     .query(async ({ ctx, input }) => {
       try {
-        const lastActiveAt = await Promise.all(
+        const lastActiveAtArray = await Promise.all(
           input.userIds.map(async (id) => {
             return ctx.redis.client.get(`user:${id}:lastActiveAt`).then((lastActiveAt) => {
-              console.log(lastActiveAt)
               return { [id]: lastActiveAt ? new Date(Number(lastActiveAt)) : null }
             })
           })
         )
-  
-        console.log({lastActiveAt})
-  
+
+        const lastActiveAt: { [key: string]: Date | null } = Object.assign({}, ...lastActiveAtArray)
+
         return lastActiveAt
+      } catch (e) {
+        console.error(e)
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' })
+      }
+    }),
+
+  onLastActiveAtUpdate: publicProcedure
+    .input(
+      z.object({
+        token: z.string(),
+        userIds: z.array(z.string())
+      })
+    )
+    .subscription(async ({ ctx, input }) => {
+      console.log({ input: input.userIds })
+      try {
+        const decodedToken = await verifyToken(input.token)
+
+        if (!decodedToken) {
+          throw new TRPCError({ code: 'UNAUTHORIZED' })
+        }
+
+        return observable<{ [x: string]: Date }>((emit) => {
+          const onLastActiveUpdate = (message: string) => {
+            const { userId, lastActiveAt } = JSON.parse(message)
+            console.log({ userId, lastActiveAt, userIds: input.userIds })
+
+            if (input.userIds.includes(userId)) {
+              emit.next({ [userId]: new Date(lastActiveAt) })
+            }
+          }
+
+          ctx.redis.subscriber.subscribe(`user:onLastActiveAtUpdate`, onLastActiveUpdate)
+          return () => {
+            ctx.redis.subscriber.unsubscribe(`user:onLastActiveAtUpdate`, onLastActiveUpdate)
+          }
+        })
+
+        // const lastActiveAtArray = await Promise.all(
+        //   input.userIds.map(async (id) => {
+        //     return ctx.redis.client.get(`user:${id}:lastActiveAt`).then((lastActiveAt) => {
+        //       return { [id]: lastActiveAt ? new Date(Number(lastActiveAt)) : null }
+        //     })
+        //   })
+        // )
+
+        // const lastActiveAt: { [key: string]: Date | null } = Object.assign({}, ...lastActiveAtArray)
+
+        // return lastActiveAt
       } catch (e) {
         console.error(e)
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' })

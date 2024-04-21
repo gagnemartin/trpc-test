@@ -2,11 +2,13 @@ import { StyleSheet } from 'react-native'
 
 const styles = StyleSheet.create({
   inputWrapper: {
-    flexDirection: 'row',
+    // flexDirection: 'row',
     alignItems: 'center',
-    padding: 20
-    // position: 'absolute',
-    // bottom: 0
+    padding: 20,
+    // backgroundColor: 'transparent'
+    position: 'absolute',
+    width: '100%',
+    bottom: 0
   },
   input: {
     // margin: 20,
@@ -17,13 +19,14 @@ const styles = StyleSheet.create({
     fontWeight: 'bold'
   },
   replyWrapper: {
-    width: '100%',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: '#f0f0f0',
     flexDirection: 'row',
+    width: '100%',
+    paddingHorizontal: 15,
+    opacity: 0.9,
     justifyContent: 'center',
-    alignItems: 'center'
+    alignItems: 'center',
+    borderRadius: 15,
+    marginBottom: 10
   }
 })
 

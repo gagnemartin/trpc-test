@@ -70,35 +70,49 @@ const conversationsRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ input, ctx }) => {
+      // TODO Make sure the use has access to this conversation
       const usersTypingString = await ctx.redis.client.get(`conversation:${input.conversationId}:typing`)
+      const currentTime = new Date()
+      let updated = !usersTypingString
+      let updatedUsersTyping: UsersTyping = {}
+
+      if (usersTypingString) {
+        const usersTyping = JSON.parse(usersTypingString)
+        const lastTypedTime = usersTyping[ctx.user.id]?.lastTyped ? new Date(usersTyping[ctx.user.id].lastTyped).getTime() : null
+
+        if (!lastTypedTime || currentTime.getTime() - lastTypedTime >= 3000) {
+          updated = true
+        }
+
+        if (!input.isTyping) {
+          updated = true
+          delete usersTyping[ctx.user.id]
+        }
+
+        updatedUsersTyping = { ...usersTyping }
+      }
+
       const userTyping: UserTyping = {
         isTyping: input.isTyping,
         profile: ctx.user.profile,
-        lastTyped: new Date().toISOString()
-      }
-      let usersTyping: UsersTyping = {
-        [ctx.user.id]: userTyping
+        lastTyped: currentTime.toISOString()
       }
 
-      if (usersTypingString) {
-        usersTyping = JSON.parse(usersTypingString)
-
-        if (input.isTyping) {
-          usersTyping[ctx.user.id] = userTyping
-        } else {
-          delete usersTyping[ctx.user.id]
-        }
+      if (input.isTyping) {
+        updatedUsersTyping[ctx.user.id] = userTyping
       }
 
-      await ctx.redis.client.set(`conversation:${input.conversationId}:typing`, JSON.stringify(usersTyping), { EX: 60 * 60 * 12 })
-      ctx.redis.publisher.publish(`conversation:${input.conversationId}:typing`, 'update')
+      if (updated) {
+        ctx.redis.publisher.publish(`conversation:typing`, JSON.stringify({ [input.conversationId]: updatedUsersTyping }))
+        await ctx.redis.client.set(`conversation:${input.conversationId}:typing`, JSON.stringify(updatedUsersTyping), { EX: 60 * 60 * 12 })
+      }
     }),
 
   whoIsTyping: publicProcedure
     .input(
       z.object({
         token: z.string(),
-        conversationId: z.string().optional()
+        conversationIds: z.array(z.string()).optional()
       })
     )
     .subscription(async ({ input, ctx }) => {
@@ -108,56 +122,69 @@ const conversationsRouter = createTRPCRouter({
         if (!decodedToken) {
           throw new TRPCError({ code: 'UNAUTHORIZED' })
         }
-        // stringified json of who is currently typing, key is the user id
-        let prev: string | null = null
+
+        const [user] = await ctx.db.select({ id: users.id }).from(users).where(eq(users.firebaseUid, decodedToken.uid)).limit(1)
+
+        if (!user) {
+          throw new TRPCError({ code: 'UNAUTHORIZED' })
+        }
+
+        if (!input.conversationIds || input.conversationIds.length === 0) {
+          return null
+        }
+
+        const conversationIds = input.conversationIds
+
+        const [hasAccess] = await ctx.db
+          .select({ id: userConversations.conversationId })
+          .from(userConversations)
+          .where(and(eq(userConversations.userId, user.id), inArray(userConversations.conversationId, conversationIds)))
+          .limit(1)
+
+        if (!hasAccess) {
+          throw new TRPCError({ code: 'UNAUTHORIZED' })
+        }
 
         // every 3s, clear old "isTyping"
         const interval = setInterval(async () => {
-          const usersTypingString = await ctx.redis.client.get(`conversation:${input.conversationId}:typing`)
           const now = Date.now()
-          let updated = false
 
-          if (usersTypingString) {
-            const usersTyping: UsersTyping = JSON.parse(usersTypingString)
+          for (const conversationId of conversationIds) {
+            const usersTypingString = await ctx.redis.client.get(`conversation:${conversationId}:typing`)
+            let updated = false
 
-            for (const [key, value] of Object.entries(usersTyping)) {
-              if (now - new Date(value.lastTyped).getTime() > 3e3) {
-                delete usersTyping[key]
-                updated = true
+            if (usersTypingString && usersTypingString !== '{}' && usersTypingString !== 'null') {
+              const usersTyping: UsersTyping = JSON.parse(usersTypingString)
+              console.log({ usersTyping, usersTypingString })
+
+              for (const [key, value] of Object.entries(usersTyping)) {
+                if (now - new Date(value.lastTyped).getTime() > 3000) {
+                  updated = true
+                  delete usersTyping[key]
+                }
+              }
+
+              if (updated) {
+                publisher.publish(`conversation:typing`, JSON.stringify({ [conversationId]: usersTyping }))
+                await ctx.redis.client.set(`conversation:${conversationId}:typing`, JSON.stringify(usersTyping), { EX: 60 * 60 * 12 })
               }
             }
-
-            if (updated) {
-              await ctx.redis.client.set(`conversation:${input.conversationId}:typing`, JSON.stringify(usersTyping), { EX: 60 * 60 * 12 })
-              publisher.publish(`conversation:${input.conversationId}:typing`, 'update')
-            }
           }
-        }, 3e3)
+        }, 3000)
         process.on('SIGTERM', () => {
           clearInterval(interval)
         })
 
-        return observable<UsersTyping | null>((emit) => {
-          const onIsTypingUpdate = async () => {
-            const usersTypingString = await ctx.redis.client.get(`conversation:${input.conversationId}:typing`)
-            let usersTyping = usersTypingString ? JSON.parse(usersTypingString) : null
-            const usersId = Object.keys(usersTyping)
-            const usersIdString = JSON.stringify(usersId)
-
-            if (usersId.length === 0) {
-              usersTyping = null
-            }
-
-            if (!prev || prev !== usersIdString) {
-              emit.next(usersTyping)
-            }
-
-            prev = usersTyping ? usersIdString : null
+        return observable<Record<string, UsersTyping>>((emit) => {
+          const onIsTypingUpdate = (message: string) => {
+            const conversationUserId = JSON.parse(message)
+            emit.next(conversationUserId)
           }
 
-          ctx.redis.subscriber.subscribe(`conversation:${input.conversationId}:typing`, onIsTypingUpdate)
+          ctx.redis.subscriber.subscribe(`conversation:typing`, onIsTypingUpdate)
+
           return () => {
-            ctx.redis.subscriber.unsubscribe(`conversation:${input.conversationId}:typing`, onIsTypingUpdate)
+            ctx.redis.subscriber.unsubscribe(`conversation:typing`, onIsTypingUpdate)
             clearInterval(interval)
           }
         })
@@ -286,12 +313,13 @@ const conversationsRouter = createTRPCRouter({
             readReceiptProfile: readReceiptProfile
           })
           .from(conversations)
+          .where(eq(conversations.id, input.id))
           .innerJoin(messages, eq(conversations.id, messages.conversationId))
           .innerJoin(readReceipts, eq(readReceipts.messageId, messages.id))
           .innerJoin(readReceiptProfile, eq(readReceiptProfile.userId, readReceipts.userId))
           .innerJoin(profiles, eq(profiles.userId, messages.sentBy))
           .leftJoin(parent, eq(parent.id, messages.parentId))
-          .orderBy(messages.createdAt)
+          .orderBy(desc(messages.createdAt))
 
         const conversationRow = rows[0].conversation
         const messagesRow: MessageFormatted[] = []
